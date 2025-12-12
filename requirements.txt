@@ -1,0 +1,8 @@
+tiatoolbox
+pandas
+matplotlib
+openslide-bin==4.0.0.8
+h5py
+streamlit
+scikit-learn
+seaborn
