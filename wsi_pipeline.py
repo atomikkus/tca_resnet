@@ -46,20 +46,29 @@ CLASS_NAMES = ["BACK", "NORM", "DEB", "TUM", "ADI", "MUC", "MUS", "STR", "LYM"]
 NUM_CLASSES = len(CLASS_NAMES)
 
 # Create label-color mapping for visualization
-def create_label_color_dict():
-    """Create a label-color dictionary for visualization."""
+def create_label_color_dict(only_tum=False):
+    """Create a label-color dictionary for visualization.
+    
+    Args:
+        only_tum: If True, only include TUM class in the legend
+    """
     label_color_dict = {}
     label_color_dict[0] = ("empty", (0, 0, 0))  # Background/empty regions
     
-    # Use Set1 colormap for the 9 classes
-    try:
-        # For matplotlib >= 3.7
-        colors = plt.colormaps["Set1"].colors
-    except AttributeError:
-        # Fallback for older matplotlib versions
-        colors = cm.get_cmap("Set1").colors
-    for i, class_name in enumerate(CLASS_NAMES):
-        label_color_dict[i + 1] = (class_name, tuple(int(255 * c) for c in colors[i]))
+    if only_tum:
+        # Only include TUM class in legend with blue color
+        tum_index = CLASS_NAMES.index("TUM")
+        label_color_dict[tum_index + 1] = ("TUM", (0, 0, 255))
+    else:
+        # Use Set1 colormap for all 9 classes
+        try:
+            # For matplotlib >= 3.7
+            colors = plt.colormaps["Set1"].colors
+        except AttributeError:
+            # Fallback for older matplotlib versions
+            colors = cm.get_cmap("Set1").colors
+        for i, class_name in enumerate(CLASS_NAMES):
+            label_color_dict[i + 1] = (class_name, tuple(int(255 * c) for c in colors[i]))
     
     return label_color_dict
 
@@ -474,27 +483,35 @@ def visualize_wsi_annotations(
     
     logger.info(f"WSI overview shape: {wsi_overview.shape}")
     
-    # Create label-color mapping
-    label_color_dict = create_label_color_dict()
+    # Filter pred_map to only show TUM class (label 4 since TUM is at index 3 and we add 1)
+    # TUM is at index 3 in CLASS_NAMES
+    tum_label = CLASS_NAMES.index("TUM") + 1
+    tum_mask = (pred_map == tum_label)
     
-    # Create overlay
-    logger.info("Creating prediction overlay...")
-    ax = overlay_prediction_mask(
-        wsi_overview,
-        pred_map,
-        alpha=alpha,
-        label_info=label_color_dict,
-        return_ax=True,
-    )
+    logger.info(f"Filtering to show only TUM class (label {tum_label})")
+    tum_pixels = np.sum(tum_mask)
+    logger.info(f"TUM pixels in annotation: {tum_pixels}")
     
-    # Get figure from axes
-    fig = ax.figure
+    # Create manual overlay - only blue for TUM regions
+    logger.info("Creating custom TUM overlay...")
+    overlay_image = wsi_overview.copy()
     
-    ax.set_title("WSI Patch Classification Overlay", fontsize=14, fontweight='bold')
+    # Create blue overlay only where TUM is detected
+    blue_color = np.array([0, 0, 255], dtype=np.uint8)
+    
+    # Apply blue overlay with alpha blending only to TUM regions
+    for i in range(3):  # RGB channels
+        overlay_image[:, :, i] = np.where(
+            tum_mask,
+            (1 - alpha) * wsi_overview[:, :, i] + alpha * blue_color[i],
+            wsi_overview[:, :, i]
+        ).astype(np.uint8)
+    
+    # Create figure without legend
+    fig, ax = plt.subplots(figsize=(12, 12))
+    ax.imshow(overlay_image)
+    ax.set_title("WSI with TUM Annotations", fontsize=14, fontweight='bold')
     ax.axis('off')
-    
-    # overlay_prediction_mask already provides a legend/colorbar via label_info.
-    # We intentionally avoid adding a second legend to keep the visualization clean.
     
     plt.tight_layout()
     
@@ -505,12 +522,13 @@ def visualize_wsi_annotations(
     return fig
 
 
-def generate_summary_report(wsi_output, output_dir=None):
+def generate_summary_report(wsi_output, pred_map=None, output_dir=None):
     """
     Generate summary statistics from WSI predictions.
     
     Args:
         wsi_output: Prediction output from predictor
+        pred_map: Prediction map array for area calculations (optional)
         output_dir: Directory to save report
     
     Returns:
@@ -551,6 +569,46 @@ def generate_summary_report(wsi_output, output_dir=None):
                 "percentage": 0.0
             }
     
+    # Calculate area coverage if pred_map is provided
+    if pred_map is not None:
+        logger.info("Calculating area coverage from prediction map...")
+        
+        # Get total tissue area (non-zero pixels)
+        total_tissue_pixels = np.sum(pred_map > 0)
+        
+        # Calculate TUM area
+        tum_label = CLASS_NAMES.index("TUM") + 1
+        tum_pixels = np.sum(pred_map == tum_label)
+        
+        # Calculate area coverage for all classes
+        report["area_coverage"] = {}
+        for i, class_name in enumerate(CLASS_NAMES):
+            class_label = i + 1
+            class_pixels = np.sum(pred_map == class_label)
+            
+            # Percentage of total tissue area
+            area_percentage = (class_pixels / total_tissue_pixels * 100) if total_tissue_pixels > 0 else 0.0
+            
+            report["area_coverage"][class_name] = {
+                "pixels": int(class_pixels),
+                "area_percentage": round(area_percentage, 2)
+            }
+        
+        report["total_tissue_pixels"] = int(total_tissue_pixels)
+        
+        # Calculate TUM vs non-TUM ratio
+        non_tum_pixels = total_tissue_pixels - tum_pixels
+        tum_percentage = (tum_pixels / total_tissue_pixels * 100) if total_tissue_pixels > 0 else 0.0
+        
+        report["tum_analysis"] = {
+            "tum_pixels": int(tum_pixels),
+            "non_tum_pixels": int(non_tum_pixels),
+            "tum_percentage": round(tum_percentage, 2),
+            "non_tum_percentage": round(100 - tum_percentage, 2)
+        }
+        
+        logger.info(f"TUM area coverage: {tum_percentage:.2f}% of total tissue area")
+    
     # Save text report
     if output_dir:
         output_dir = Path(output_dir)
@@ -565,13 +623,36 @@ def generate_summary_report(wsi_output, output_dir=None):
             f.write("=" * 80 + "\n\n")
             f.write(f"Total Patches: {report['total_patches']}\n\n")
             f.write("-" * 80 + "\n")
-            f.write("CLASS DISTRIBUTION\n")
+            f.write("CLASS DISTRIBUTION (by patch count)\n")
             f.write("-" * 80 + "\n")
             f.write(f"{'Class':<10} {'Count':<10} {'Percentage':<10}\n")
             f.write("-" * 80 + "\n")
             for class_name in CLASS_NAMES:
                 dist = report["class_distribution"][class_name]
                 f.write(f"{class_name:<10} {dist['count']:<10} {dist['percentage']:<10.2f}%\n")
+            
+            # Add area coverage section if available
+            if "area_coverage" in report:
+                f.write("\n" + "=" * 80 + "\n")
+                f.write("AREA COVERAGE ANALYSIS (by pixel area)\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(f"Total Tissue Pixels: {report['total_tissue_pixels']:,}\n\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"{'Class':<10} {'Pixels':<15} {'Area %':<10}\n")
+                f.write("-" * 80 + "\n")
+                for class_name in CLASS_NAMES:
+                    area = report["area_coverage"][class_name]
+                    f.write(f"{class_name:<10} {area['pixels']:<15,} {area['area_percentage']:<10.2f}%\n")
+                
+                # Add TUM analysis section
+                if "tum_analysis" in report:
+                    f.write("\n" + "=" * 80 + "\n")
+                    f.write("TUM AREA ANALYSIS\n")
+                    f.write("=" * 80 + "\n\n")
+                    tum = report["tum_analysis"]
+                    f.write(f"TUM Pixels:         {tum['tum_pixels']:>15,} ({tum['tum_percentage']:>6.2f}%)\n")
+                    f.write(f"Non-TUM Pixels:     {tum['non_tum_pixels']:>15,} ({tum['non_tum_percentage']:>6.2f}%)\n")
+                    f.write(f"Total Tissue:       {report['total_tissue_pixels']:>15,} (100.00%)\n")
         
         logger.info(f"Summary report saved to {report_path}")
     
@@ -729,22 +810,9 @@ def main():
         use_otsu_mask=not args.no_otsu_mask,
     )
     
-    # Step 3: Generate summary report
+    # Step 3: Create prediction map
     logger.info("\n" + "=" * 80)
-    logger.info("STEP 3: Generating summary report")
-    logger.info("=" * 80)
-    report = generate_summary_report(wsi_output, output_dir=args.output_dir)
-    
-    # Print summary to console
-    logger.info(f"\nTotal patches classified: {report['total_patches']}")
-    logger.info("\nClass distribution:")
-    for class_name in CLASS_NAMES:
-        dist = report["class_distribution"][class_name]
-        logger.info(f"  {class_name}: {dist['count']} ({dist['percentage']:.2f}%)")
-    
-    # Step 4: Create prediction map
-    logger.info("\n" + "=" * 80)
-    logger.info("STEP 4: Creating prediction map")
+    logger.info("STEP 3: Creating prediction map")
     logger.info("=" * 80)
     pred_map = create_prediction_map(
         predictor,
@@ -754,6 +822,26 @@ def main():
         overview_units=args.overview_units,
         patch_size=tuple(args.patch_size),
     )
+    
+    # Step 4: Generate summary report with area coverage
+    logger.info("\n" + "=" * 80)
+    logger.info("STEP 4: Generating summary report with area analysis")
+    logger.info("=" * 80)
+    report = generate_summary_report(wsi_output, pred_map=pred_map, output_dir=args.output_dir)
+    
+    # Print summary to console
+    logger.info(f"\nTotal patches classified: {report['total_patches']}")
+    logger.info("\nClass distribution (by patch count):")
+    for class_name in CLASS_NAMES:
+        dist = report["class_distribution"][class_name]
+        logger.info(f"  {class_name}: {dist['count']} ({dist['percentage']:.2f}%)")
+    
+    if "tum_analysis" in report:
+        logger.info("\nTUM Area Analysis:")
+        tum = report["tum_analysis"]
+        logger.info(f"  TUM coverage: {tum['tum_percentage']:.2f}% of tissue area")
+        logger.info(f"  TUM pixels: {tum['tum_pixels']:,}")
+        logger.info(f"  Non-TUM pixels: {tum['non_tum_pixels']:,}")
     
     # Step 5: Visualize annotations
     logger.info("\n" + "=" * 80)

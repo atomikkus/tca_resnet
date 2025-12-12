@@ -74,6 +74,8 @@ Thumbs.db
 *.pptx
 *.ppt
 *.tif
+*.npy
+*.csv
 
 
 
